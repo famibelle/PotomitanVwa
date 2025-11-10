@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+# Models and training outputs
+whisper-finetuned*/
+models/
+checkpoints/
+*.pkl
+*.pth
+*.bin
+*.safetensors
+
+# Data directories (comment out if you want to include sample data)
+data/
+datasets/
+audio_files/
+*.mp3
+*.wav
+*.flac
+*.m4a
+
+# Training logs
+logs/
+runs/
+tensorboard_logs/
+lightning_logs/
+
+# Cache
+.cache/
+.huggingface/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Large files
+*.zip
+*.tar.gz
+*.rar
+
+# Training templates (you might want to keep these)
+# training_templates/
+
+# Credentials (NEVER commit these)
+*.token
+*.key
+*credentials*
+config.ini
