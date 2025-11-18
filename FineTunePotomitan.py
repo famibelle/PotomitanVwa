@@ -300,7 +300,7 @@ def create_transcripts_from_potomitan(potomitan_ds, output_file="potomitan_trans
     
     return transcripts
 
-def fine_tune_whisper(model_name="misterkissi/whisper-small-haitian-creole", data_dir="./data", output_dir="./whisper-finetuned-potomitan", use_potomitan_dataset=True):
+def fine_tune_whisper(model_name="openai/whisper-small", data_dir="./data", output_dir="./whisper-finetuned-potomitan", use_potomitan_dataset=True):
     # Détecter et configurer le device (GPU/CPU)
     device, has_gpu = setup_device()
     
@@ -380,30 +380,31 @@ def fine_tune_whisper(model_name="misterkissi/whisper-small-haitian-creole", dat
     dataset_size = len(dataset)
     
     if has_gpu:
-        # Configuration réduite pour éviter OOM (Out Of Memory)
-        batch_size = 4  # Réduit de 8 à 4
-        gradient_accumulation = 4  # Augmenté de 2 à 4
+        # Configuration optimisée pour whisper-small (modèle plus lourd)
+        batch_size = 4  # Batch réduit pour whisper-small (plus de mémoire par sample)
+        gradient_accumulation = 8  # Augmenté pour compenser le batch réduit
         fp16_enabled = True
-        # Calculer max_steps basé sur la taille du dataset (environ 3 époques)
-        max_steps = min(2000, (dataset_size * 3) // (batch_size * gradient_accumulation))
+        # 50 époques pour améliorer encore la qualité
+        max_steps = min(6000, (dataset_size * 50) // (batch_size * gradient_accumulation))
         print(f"\n⚙️  Configuration GPU: batch_size={batch_size}, gradient_accumulation={gradient_accumulation}, fp16=True")
-        print(f"   Dataset: {dataset_size} exemples, max_steps={max_steps}")
+        print(f"   Dataset: {dataset_size} exemples, max_steps={max_steps} (~50 époques)")
+        print(f"   Modèle: whisper-small (plus précis mais plus lent que tiny)")
     else:
         # Configuration réduite pour CPU
         batch_size = 2
-        gradient_accumulation = 8
+        gradient_accumulation = 16
         fp16_enabled = False
-        max_steps = min(500, (dataset_size * 2) // (batch_size * gradient_accumulation))
+        max_steps = min(1000, (dataset_size * 25) // (batch_size * gradient_accumulation))
         print(f"\n⚙️  Configuration CPU: batch_size={batch_size}, steps réduits à {max_steps}")
 
-    # Arguments d'entraînement optimisés pour le fine-tuning d'un modèle déjà adapté au créole
+    # Arguments d'entraînement optimisés pour whisper-tiny
     training_args = TrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=gradient_accumulation,
-        warmup_steps=100,
+        warmup_steps=200,  # Plus de warmup steps
         max_steps=max_steps,
-        learning_rate=5e-6,
+        learning_rate=1e-5,  # Learning rate du modèle haïtien qui marche bien
         fp16=fp16_enabled,
         eval_strategy="no",
         save_steps=200,
@@ -474,7 +475,7 @@ if __name__ == "__main__":
     print("="*70)
     print("FINE-TUNING WHISPER POUR LE CRÉOLE GUADELOUPÉEN - PROJET POTOMITAN")
     print("="*70)
-    print("🎯 Modèle de base: misterkissi/whisper-small-haitian-creole")
+    print("🎯 Modèle de base: openai/whisper-tiny")
     print("📊 Dataset local: ./audio (1808 exemples)")
     print("📚 Dataset HuggingFace (fallback): POTOMITAN/potomitan-gcf-transcription")
     print("="*70)
@@ -497,7 +498,7 @@ if __name__ == "__main__":
     
     # Lancer le fine-tuning
     fine_tune_whisper(
-        model_name="misterkissi/whisper-small-haitian-creole",
+        model_name="openai/whisper-small",
         data_dir=data_dir,
         output_dir="./whisper-finetuned-potomitan",
         use_potomitan_dataset=use_hf
