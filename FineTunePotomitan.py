@@ -1,11 +1,63 @@
 import torch
 from transformers import WhisperProcessor, WhisperForConditionalGeneration, Trainer, TrainingArguments
 from datasets import Dataset, Audio, load_dataset
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union
 import librosa
 import numpy as np
 from pathlib import Path
 import json
 import os
+
+def setup_device():
+    """Détecte et configure le device (GPU/CPU) pour l'entraînement"""
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"\n🚀 GPU détecté: {gpu_name}")
+        print(f"   Mémoire GPU: {gpu_memory:.2f} GB")
+        print(f"   CUDA version: {torch.version.cuda}")
+        
+        # Optimisations CUDA
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        return device, True
+    else:
+        device = torch.device("cpu")
+        print(f"\n⚠️  Aucun GPU détecté - Utilisation du CPU")
+        print(f"   L'entraînement sera beaucoup plus lent sur CPU")
+        print(f"   Conseil: Utilisez Google Colab ou un service cloud avec GPU")
+        return device, False
+
+@dataclass
+class DataCollatorSpeechSeq2SeqWithPadding:
+    """Data collator pour Whisper - gère le padding des audio et des labels"""
+    processor: Any
+
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        # Séparer les inputs et les labels
+        input_features = [{"input_features": feature["input_features"]} for feature in features]
+        label_features = [{"input_ids": feature["labels"]} for feature in features]
+
+        # Padding des inputs audio
+        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+
+        # Padding des labels
+        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+
+        # Remplacer les tokens de padding par -100 pour ignorer dans la loss
+        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+
+        # Si bos token au début, le supprimer (Whisper ajoute automatiquement le token de début)
+        if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
+            labels = labels[:, 1:]
+
+        batch["labels"] = labels
+
+        return batch
 
 class WhisperDataset:
     def __init__(self, audio_files, transcripts, processor):
@@ -109,22 +161,110 @@ def load_data_from_local(data_dir):
         print(f"Le répertoire {data_dir} n'existe pas.")
         return [], []
     
-    metadata_file = data_path / "metadata.json"
-    if not metadata_file.exists():
-        print(f"Le fichier {metadata_file} n'existe pas.")
+    # Chercher gcf_fr_translation_dataset_v3.json, metadata.json ou metadata.jsonl
+    gcf_translation_json = data_path / "gcf_fr_translation_dataset_v3.json"
+    metadata_json = data_path / "metadata.json"
+    metadata_jsonl = data_path / "metadata.jsonl"
+    
+    if gcf_translation_json.exists():
+        # Format JSON du dataset de traduction GCF-FR
+        print(f"Chargement depuis {gcf_translation_json}")
+        try:
+            with open(gcf_translation_json, "r", encoding="utf-8-sig") as f:
+                metadata = json.load(f)
+        except UnicodeDecodeError:
+            with open(gcf_translation_json, "r", encoding="latin-1") as f:
+                metadata = json.load(f)
+        
+        for item in metadata:
+            # Dans ce dataset: 'audio' contient le chemin, 'gcf' contient le texte créole
+            audio_field = item.get('audio')
+            transcript_field = item.get('gcf')
+            
+            if audio_field and transcript_field:
+                # Retirer le préfixe 'audio/' si présent car data_path pointe déjà vers ./audio
+                if audio_field.startswith('audio/'):
+                    audio_filename = audio_field[6:]  # Retirer 'audio/'
+                elif audio_field.startswith('audio\\'):
+                    audio_filename = audio_field[6:]  # Retirer 'audio\\'
+                else:
+                    audio_filename = audio_field
+                
+                audio_path = data_path / audio_filename
+                
+                if audio_path.exists():
+                    audio_files.append(str(audio_path))
+                    transcripts.append(transcript_field)
+                else:
+                    if len(audio_files) <= 3:  # N'afficher que les 3 premières erreurs
+                        print(f"Fichier audio manquant: {audio_path}")
+        
+    elif metadata_jsonl.exists():
+        # Format JSONL (une ligne JSON par entrée)
+        print(f"Chargement depuis {metadata_jsonl}")
+        # Essayer différents encodages
+        try:
+            with open(metadata_jsonl, "r", encoding="utf-8-sig") as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            try:
+                with open(metadata_jsonl, "r", encoding="latin-1") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                with open(metadata_jsonl, "r", encoding="cp1252") as f:
+                    content = f.read()
+        
+        for line_num, line in enumerate(content.strip().split('\n'), 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line.strip())
+                # Détecter le champ audio (peut être 'file_name', 'audio', 'audio_file', etc.)
+                audio_field = item.get('file_name') or item.get('audio') or item.get('audio_file')
+                # Détecter le champ transcription
+                transcript_field = item.get('transcription') or item.get('text') or item.get('transcript')
+                
+                if audio_field and transcript_field:
+                    # Le chemin peut déjà contenir 'audio/' ou non
+                    if audio_field.startswith('audio/') or audio_field.startswith('audio\\'):
+                        audio_path = data_path / audio_field
+                    else:
+                        # Essayer d'abord avec audio/, sinon directement
+                        audio_path = data_path / "audio" / audio_field
+                        if not audio_path.exists():
+                            audio_path = data_path / audio_field
+                    
+                    if audio_path.exists():
+                        audio_files.append(str(audio_path))
+                        transcripts.append(transcript_field)
+                    else:
+                        if line_num <= 3:  # N'afficher que les 3 premières erreurs
+                            print(f"Fichier audio manquant (ligne {line_num}): {audio_path}")
+            except json.JSONDecodeError as e:
+                print(f"Erreur JSON ligne {line_num}: {e}")
+                    
+    elif metadata_json.exists():
+        # Format JSON classique
+        print(f"Chargement depuis {metadata_json}")
+        with open(metadata_json, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        
+        for item in metadata:
+            audio_field = item.get('audio_file') or item.get('file_name') or item.get('audio')
+            transcript_field = item.get('transcript') or item.get('transcription') or item.get('text')
+            
+            if audio_field and transcript_field:
+                audio_path = data_path / audio_field
+                if audio_path.exists():
+                    audio_files.append(str(audio_path))
+                    transcripts.append(transcript_field)
+                else:
+                    print(f"Fichier audio manquant: {audio_path}")
+    else:
+        print(f"Aucun fichier metadata trouvé dans {data_dir}")
+        print("Formats supportés: metadata.json ou metadata.jsonl")
         return [], []
-    
-    # Charger le fichier JSON avec les paires
-    with open(metadata_file, "r", encoding="utf-8") as f:
-        metadata = json.load(f)
-    
-    for item in metadata:
-        audio_path = data_path / item["audio_file"]
-        if audio_path.exists():
-            audio_files.append(str(audio_path))
-            transcripts.append(item["transcript"])
-        else:
-            print(f"Fichier audio manquant: {audio_path}")
     
     return audio_files, transcripts
 
@@ -161,10 +301,17 @@ def create_transcripts_from_potomitan(potomitan_ds, output_file="potomitan_trans
     return transcripts
 
 def fine_tune_whisper(model_name="misterkissi/whisper-small-haitian-creole", data_dir="./data", output_dir="./whisper-finetuned-potomitan", use_potomitan_dataset=True):
+    # Détecter et configurer le device (GPU/CPU)
+    device, has_gpu = setup_device()
+    
     # Charger le modèle et le processeur pré-entraîné pour le créole haïtien
-    print(f"Chargement du modèle: {model_name}")
+    print(f"\nChargement du modèle: {model_name}")
     processor = WhisperProcessor.from_pretrained(model_name)
     model = WhisperForConditionalGeneration.from_pretrained(model_name)
+    
+    # Déplacer le modèle sur le device approprié
+    model = model.to(device)
+    print(f"✓ Modèle chargé sur {device}")
     
     dataset = None
     
@@ -226,26 +373,51 @@ def fine_tune_whisper(model_name="misterkissi/whisper-small-haitian-creole", dat
     
     print(f"\n✓ Dataset prêt avec {len(dataset)} exemples pour l'entraînement")
     
+    # Data collator pour gérer le padding
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
+
+    # Ajuster les paramètres selon GPU/CPU et taille du dataset
+    dataset_size = len(dataset)
+    
+    if has_gpu:
+        # Configuration réduite pour éviter OOM (Out Of Memory)
+        batch_size = 4  # Réduit de 8 à 4
+        gradient_accumulation = 4  # Augmenté de 2 à 4
+        fp16_enabled = True
+        # Calculer max_steps basé sur la taille du dataset (environ 3 époques)
+        max_steps = min(2000, (dataset_size * 3) // (batch_size * gradient_accumulation))
+        print(f"\n⚙️  Configuration GPU: batch_size={batch_size}, gradient_accumulation={gradient_accumulation}, fp16=True")
+        print(f"   Dataset: {dataset_size} exemples, max_steps={max_steps}")
+    else:
+        # Configuration réduite pour CPU
+        batch_size = 2
+        gradient_accumulation = 8
+        fp16_enabled = False
+        max_steps = min(500, (dataset_size * 2) // (batch_size * gradient_accumulation))
+        print(f"\n⚙️  Configuration CPU: batch_size={batch_size}, steps réduits à {max_steps}")
+
     # Arguments d'entraînement optimisés pour le fine-tuning d'un modèle déjà adapté au créole
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=4,  # Réduit pour éviter les erreurs de mémoire
-        gradient_accumulation_steps=4,  # Augmenté pour compenser la batch size réduite
-        warmup_steps=100,               # Réduit car on part d'un modèle déjà adapté
-        max_steps=2000,                 # Moins d'étapes nécessaires
-        learning_rate=5e-6,             # Learning rate plus bas pour un fine-tuning délicat
-        fp16=True,
-        evaluation_strategy="steps",
-        eval_steps=200,                 # Évaluation plus fréquente
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation,
+        warmup_steps=100,
+        max_steps=max_steps,
+        learning_rate=5e-6,
+        fp16=fp16_enabled,
+        eval_strategy="no",
         save_steps=200,
         logging_steps=10,
         report_to=["tensorboard"],
-        load_best_model_at_end=True,
-        metric_for_best_model="loss",
-        greater_is_better=False,
         push_to_hub=False,
-        dataloader_drop_last=True,      # Évite les problèmes de batch size
-        remove_unused_columns=False,    # Important pour Whisper
+        dataloader_drop_last=True,
+        remove_unused_columns=False,
+        save_total_limit=3,
+        # Optimisations supplémentaires pour GPU
+        dataloader_num_workers=4 if has_gpu else 0,
+        dataloader_pin_memory=has_gpu,
+        # Gradient checkpointing désactivé (cause des conflits avec backward)
+        gradient_checkpointing=False,
     )
     
     # Entraîneur
@@ -253,7 +425,8 @@ def fine_tune_whisper(model_name="misterkissi/whisper-small-haitian-creole", dat
         model=model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=processor.feature_extractor,
+        data_collator=data_collator,
+        processing_class=processor.feature_extractor,
     )
     
     # Démarrer l'entraînement
@@ -286,27 +459,46 @@ def test_model(model_path, audio_file_path):
     return transcription[0]
 
 if __name__ == "__main__":
-    # Structure attendue du répertoire data (optionnel si dataset HF disponible):
+    # Structure attendue du répertoire data:
     # data/
-    #   ├── metadata.json  (contient [{"audio_file": "audio1.mp3", "transcript": "texte..."}, ...])
+    #   ├── metadata.jsonl  (format JSONL avec file_name et transcription)
+    #   ├── audio/
+    #   │   ├── audio1.mp3
+    #   │   ├── audio2.mp3
+    #   │   └── ...
+    # OU
+    #   ├── metadata.json  (format JSON classique)
     #   ├── audio1.mp3
-    #   ├── audio2.mp3
     #   └── ...
     
     print("="*70)
     print("FINE-TUNING WHISPER POUR LE CRÉOLE GUADELOUPÉEN - PROJET POTOMITAN")
     print("="*70)
     print("🎯 Modèle de base: misterkissi/whisper-small-haitian-creole")
-    print("📊 Dataset audio: POTOMITAN/potomitan-gcf-transcription") 
-    print("📚 Dataset traduction: POTOMITAN/potomitan-gcf-fr-translation")
+    print("📊 Dataset local: ./audio (1808 exemples)")
+    print("📚 Dataset HuggingFace (fallback): POTOMITAN/potomitan-gcf-transcription")
     print("="*70)
     
     print("\n🚀 Démarrage du processus de fine-tuning...")
     
-    # Lancer le fine-tuning avec priorité sur le dataset POTOMITAN audio
+    # Dataset local par défaut (dans le répertoire du projet)
+    local_dataset_path = "./audio"
+    
+    # Vérifier si le dataset local existe
+    if Path(local_dataset_path).exists():
+        print(f"\n✓ Dataset local trouvé: {local_dataset_path}")
+        use_hf = False
+        data_dir = local_dataset_path
+    else:
+        print(f"\n⚠️  Dataset local non trouvé: {local_dataset_path}")
+        print("Tentative avec HuggingFace ou ./data...")
+        use_hf = True
+        data_dir = "./data"
+    
+    # Lancer le fine-tuning
     fine_tune_whisper(
         model_name="misterkissi/whisper-small-haitian-creole",
-        data_dir="./data",
+        data_dir=data_dir,
         output_dir="./whisper-finetuned-potomitan",
-        use_potomitan_dataset=True
+        use_potomitan_dataset=use_hf
     )
