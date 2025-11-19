@@ -300,7 +300,7 @@ def create_transcripts_from_potomitan(potomitan_ds, output_file="potomitan_trans
     
     return transcripts
 
-def fine_tune_whisper(model_name="openai/whisper-small", data_dir="./data", output_dir="./whisper-finetuned-potomitan", use_potomitan_dataset=True):
+def fine_tune_whisper(model_name="openai/whisper-tiny", data_dir="./data", output_dir="./whisper-finetuned-potomitan", use_potomitan_dataset=True):
     # Détecter et configurer le device (GPU/CPU)
     device, has_gpu = setup_device()
     
@@ -380,21 +380,21 @@ def fine_tune_whisper(model_name="openai/whisper-small", data_dir="./data", outp
     dataset_size = len(dataset)
     
     if has_gpu:
-        # Configuration optimisée pour whisper-small (modèle plus lourd)
-        batch_size = 4  # Batch réduit pour whisper-small (plus de mémoire par sample)
-        gradient_accumulation = 8  # Augmenté pour compenser le batch réduit
+        # Configuration optimisée pour whisper-tiny avec 100 époques
+        batch_size = 8  # Whisper-tiny permet un batch plus grand
+        gradient_accumulation = 4
         fp16_enabled = True
-        # 50 époques pour améliorer encore la qualité
-        max_steps = min(6000, (dataset_size * 50) // (batch_size * gradient_accumulation))
+        # 100 époques pour maximiser l'apprentissage sans overfitting
+        max_steps = min(11000, (dataset_size * 100) // (batch_size * gradient_accumulation))
         print(f"\n⚙️  Configuration GPU: batch_size={batch_size}, gradient_accumulation={gradient_accumulation}, fp16=True")
-        print(f"   Dataset: {dataset_size} exemples, max_steps={max_steps} (~50 époques)")
-        print(f"   Modèle: whisper-small (plus précis mais plus lent que tiny)")
+        print(f"   Dataset: {dataset_size} exemples, max_steps={max_steps} (~100 époques)")
+        print(f"   Modèle: whisper-tiny (optimal pour dataset de taille moyenne)")
     else:
         # Configuration réduite pour CPU
-        batch_size = 2
-        gradient_accumulation = 16
+        batch_size = 4
+        gradient_accumulation = 8
         fp16_enabled = False
-        max_steps = min(1000, (dataset_size * 25) // (batch_size * gradient_accumulation))
+        max_steps = min(2000, (dataset_size * 50) // (batch_size * gradient_accumulation))
         print(f"\n⚙️  Configuration CPU: batch_size={batch_size}, steps réduits à {max_steps}")
 
     # Arguments d'entraînement optimisés pour whisper-tiny
@@ -498,7 +498,7 @@ if __name__ == "__main__":
     
     # Lancer le fine-tuning
     fine_tune_whisper(
-        model_name="openai/whisper-small",
+        model_name="openai/whisper-tiny",
         data_dir=data_dir,
         output_dir="./whisper-finetuned-potomitan",
         use_potomitan_dataset=use_hf
